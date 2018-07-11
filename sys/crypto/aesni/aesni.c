@@ -273,7 +273,7 @@ aesni_newsession(device_t dev, uint32_t *sidp, struct cryptoini *cri)
 	encini = NULL;
 	gcm = false;
 	gcm_hash = false;
-	ccm = false;
+	ccm = cbc_hash = false;
 
 	for (; cri != NULL; cri = cri->cri_next) {
 		switch (cri->cri_alg) {
