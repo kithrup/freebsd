@@ -281,10 +281,8 @@ aesni_newsession(device_t dev, uint32_t *sidp, struct cryptoini *cri)
 		case CRYPTO_AES_CCM_16:
 			if (cri->cri_alg == CRYPTO_AES_NIST_GCM_16) {
 				gcm = true;
-				ccm = false;
 			} else if (cri->cri_alg == CRYPTO_AES_CCM_16) {
 				ccm = true;
-				gcm = false;
 			}
 			/* FALLTHROUGH */
 		case CRYPTO_AES_CBC:
@@ -856,8 +854,9 @@ aesni_cipher_crypt(struct aesni_session *ses, struct cryptodesc *enccrd,
 	int error, ivlen;
 	bool encflag, allocated, authallocated;
 
-	KASSERT(ses->algo != CRYPTO_AES_NIST_GCM_16 || authcrd != NULL,
-	    ("AES_NIST_GCM_16 must include MAC descriptor"));
+	KASSERT((ses->algo != CRYPTO_AES_NIST_GCM_16 &&
+		ses->algo != CRYPTO_AES_CCM_16) || authcrd != NULL,
+	    ("AES_NIST_GCM_16/AES_CCM_16  must include MAC descriptor"));
 
 	ivlen = 0;
 	authbuf = NULL;

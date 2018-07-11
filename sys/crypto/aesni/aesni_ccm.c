@@ -30,6 +30,10 @@
  *
  *	$FreeBSD$
  *
+ * This file implements AES-CCM+CBC-MAC, as described
+ * at https://tools.ietf.org/html/rfc3610, using Intel's
+ * AES-NI instructions.
+ *
  */
 
 #include <sys/types.h>
@@ -40,6 +44,8 @@
 #include <sys/systm.h>
 #include <crypto/aesni/aesni.h>
 #include <crypto/aesni/aesni_os.h>
+#include <crypto/aesni/aesencdec.h>
+#define AESNI_ENC(d, k, nr)	aesni_enc(nr-1, (const __m128i*)k, d)
 #else
 #include <stdio.h>
 #include <stdint.h>
@@ -52,6 +58,11 @@
 #include <emmintrin.h>
 #include <smmintrin.h>
 
+typedef union {
+	__m128i	block;
+	uint8_t	bytes[sizeof(__m128i)];
+} aes_block_t;
+
 #ifndef _KERNEL
 static void
 panic(const char *fmt, ...)
@@ -59,6 +70,7 @@ panic(const char *fmt, ...)
 	va_list ap;
 	va_start(ap, fmt);
 	verrx(1, fmt, ap);
+	va_end(ap);
 }
 #endif
 
@@ -78,8 +90,9 @@ PrintBlock(const char *label, __m128i b)
 static void PrintHex(const void *, size_t);
 #endif
 
+#ifndef _KERNEL
 /*
- * Encrypt without xoring.
+ * Convenience wrapper to do AES encryption.
  */
 static inline __m128i
 aes_encrypt(__m128i data, const unsigned char *k, int nr)
@@ -94,6 +107,7 @@ aes_encrypt(__m128i data, const unsigned char *k, int nr)
 	retval = _mm_aesenclast_si128(retval, key[nr]);
 	return retval;
 }
+#endif
 
 /*
  * Encrypt a single 128-bit block after
@@ -109,7 +123,7 @@ xor_and_encrypt(__m128i a, __m128i b, const unsigned char *k, int nr)
 	PrintBlock("\tb\t", b);
 	PrintBlock("\tresult\t", retval);
 #endif
-	retval = aes_encrypt(retval, k, nr);
+	retval = AESNI_ENC(retval, k, nr);
 	return retval;
 }
 
@@ -131,7 +145,7 @@ append_int(size_t value, __m128i *block, size_t offset)
 }
 
 /*
- * Tart the CBC-MAC process.  This handles the auth data.
+ * Start the CBC-MAC process.  This handles the auth data.
  */
 static __m128i
 cbc_mac_start(const unsigned char *auth_data, size_t auth_len,
@@ -139,13 +153,16 @@ cbc_mac_start(const unsigned char *auth_data, size_t auth_len,
 	     const unsigned char *key, int nr,
 	     size_t data_len, size_t tag_len)
 {
-	union {
-		__m128i block;
-		uint8_t bytes[sizeof(__m128i)];
-	} retval, temp_block;
+	aes_block_t  retval, temp_block;
 	/* This defines where the message length goes */
 	int L = sizeof(__m128i) - 1 - nonce_len;
-	bzero(&retval, sizeof(retval));
+
+	/*
+	 * Set up B0 here.  This has the flags byte,
+	 * followed by the nonce, followed by the
+	 * length of the message.
+	 */
+	retval.block = _mm_setzero_si128();
 	retval.bytes[0] = (auth_len ? 1 : 0) * 64 |
 		(((tag_len - 2) / 2) * 8) |
 		(L - 1);
@@ -154,7 +171,7 @@ cbc_mac_start(const unsigned char *auth_data, size_t auth_len,
 #ifdef CRYPTO_DEBUG
 	PrintBlock("Plain B0", retval.block);
 #endif
-	retval.block = aes_encrypt(retval.block, key, nr);
+	retval.block = AESNI_ENC(retval.block, key, nr);
 
 	if (auth_len) {
 		/*
@@ -164,7 +181,7 @@ cbc_mac_start(const unsigned char *auth_data, size_t auth_len,
 		size_t copy_amt;
 		const uint8_t *auth_ptr = auth_data;
 
-		bzero(&temp_block, sizeof(temp_block));
+		temp_block.block = _mm_setzero_si128();
 
 		if (auth_len < ((1<<16) - (1<<8))) {
 			uint16_t *ip = (uint16_t*)&temp_block;
@@ -207,6 +224,19 @@ cbc_mac_start(const unsigned char *auth_data, size_t auth_len,
 
 /*
  * Implement AES CCM+CBC-MAC encryption and authentication.
+ *
+ * A couple of notes:
+ * The specification allows for a different number of tag lengths;
+ * however, they're always truncated from 16 bytes, and the tag
+ * length isn't passed in.  (This could be fixed by changing the
+ * code in aesni.c:aesni_cipher_crypt().)
+ * Similarly, although the nonce length is passed in, the
+ * OpenCrypto API that calls us doesn't have a way to set the nonce
+ * other than by having different crypto algorithm types.  As a result,
+ * this is currently always called with nlen=12; this means that we
+ * also have a maximum message length of 16MBytes.  And similarly,
+ * since abyes is limited to a 32 bit value here, the AAD is
+ * limited to 4gbytes or less.
  */
 void
 AES_CCM_encrypt(const unsigned char *in, unsigned char *out,
@@ -219,11 +249,8 @@ AES_CCM_encrypt(const unsigned char *in, unsigned char *out,
 	int counter = 1;	/* S0 has 0, S1 has 1 */
 	size_t copy_amt, total = 0;
 	
-	union {
-		__m128i block;
-		uint8_t bytes[sizeof(__m128i)];
-	} s0, last_block, current_block, s_x, temp_block;
-	
+	aes_block_t s0, last_block, current_block, s_x, temp_block;
+
 #ifdef CRYPTO_DEBUG
 	printf("%s(%p, %p, %p, %p, %p, %u, %u, %d, %p, %d)\n",
 	       __FUNCTION__, in, out, addt, nonce, tag, nbytes, abytes, nlen, key, nr);
@@ -238,7 +265,8 @@ AES_CCM_encrypt(const unsigned char *in, unsigned char *out,
 	 * We need to know how many bytes to use to describe
 	 * the length of the data.  Normally, nlen should be
 	 * 12, which leaves us 3 bytes to do that -- 16mbytes of
-	 * data to encrypt.  But it can be longer or shorter.
+	 * data to encrypt.  But it can be longer or shorter;
+	 * this impacts the length of the message.
 	 */
 	L = sizeof(__m128i) - 1 - nlen;
 
@@ -248,7 +276,7 @@ AES_CCM_encrypt(const unsigned char *in, unsigned char *out,
 	 */
 	if (nbytes > ((1 << (8 * L)) - 1))
 		panic("%s: nbytes is %u, but length field is %d bytes",
-		      __FUNCTION__, nbytes, L);
+		    __FUNCTION__, nbytes, L);
 	/*
 	 * Clear out the blocks
 	 */
@@ -256,7 +284,7 @@ AES_CCM_encrypt(const unsigned char *in, unsigned char *out,
 	explicit_bzero(&current_block, sizeof(current_block));
 
 	last_block.block = cbc_mac_start(addt, abytes, nonce, nlen,
-					 key, nr, nbytes, tag_length);
+	    key, nr, nbytes, tag_length);
 
 	/* s0 has flags, nonce, and then 0 */
 	s0.bytes[0] = L-1;	/* but the flags byte only has L' */
@@ -278,7 +306,8 @@ AES_CCM_encrypt(const unsigned char *in, unsigned char *out,
 		copy_amt = MIN(nbytes - total, sizeof(temp_block));
 		bcopy(in+total, &temp_block, copy_amt);
 		if (copy_amt < sizeof(temp_block)) {
-			bzero(&temp_block.bytes[copy_amt], sizeof(temp_block) - copy_amt);
+			bzero(&temp_block.bytes[copy_amt],
+			    sizeof(temp_block) - copy_amt);
 		}
 #ifdef CRYPTO_DEBUG
 		PrintBlock("Plain text", temp_block.block);
@@ -288,7 +317,7 @@ AES_CCM_encrypt(const unsigned char *in, unsigned char *out,
 		/* Put the counter into the s_x block */
 		append_int(counter++, &s_x.block, L+1);
 		/* Encrypt that */
-		__m128i X = aes_encrypt(s_x.block, key, nr);
+		__m128i X = AESNI_ENC(s_x.block, key, nr);
 		/* XOR the plain-text with the encrypted counter block */
 		temp_block.block = _mm_xor_si128(temp_block.block, X);
 #ifdef CRYPTO_DEBUG
@@ -304,14 +333,13 @@ AES_CCM_encrypt(const unsigned char *in, unsigned char *out,
 #ifdef CRYPTO_DEBUG
 	PrintBlock("Final last block", last_block.block);
 #endif
-	s0.block = aes_encrypt(s0.block, key, nr);
+	s0.block = AESNI_ENC(s0.block, key, nr);
 	temp_block.block = _mm_xor_si128(s0.block, last_block.block);
 #ifdef CRYPTO_DEBUG
 	printf("Tag length %d; ", tag_length);
 	PrintBlock("Final tag", temp_block.block);
 #endif
 	bcopy(&temp_block, tag, tag_length);
-	explicit_bzero(&s0, sizeof(s0));
 	return;
 }
 
@@ -322,8 +350,90 @@ AES_CCM_encrypt(const unsigned char *in, unsigned char *out,
  * The primary difference here is that each encrypted block
  * needs to be hashed&encrypted after it is decrypted (since
  * the CBC-MAC is based on the plain text).  This means that
- * if the hash comparison fails, we need to zero out the
- * output buffer completely.
+ * we do the decryption twice -- first to verify the tag,
+ * and second to decrypt and copy it out.
+ *
+ * To avoid annoying code copying, we implement the main
+ * loop as a separate function.
+ *
+ * Call with out as NULL to not store the decrypted results;
+ * call with hashp as NULL to not run the authentication.
+ * Calling with neither as NULL does the decryption and
+ * authentication as a single pass (which is not allowed
+ * per the specification, really).
+ *
+ * If hashp is non-NULL, it points to the post-AAD computed
+ * checksum.
+ */
+static void
+decrypt_loop(const unsigned char *in, unsigned char *out, size_t nbytes,
+    aes_block_t s0, size_t nonce_length, aes_block_t *hashp,
+    const unsigned char *key, int nr)
+{
+	size_t total = 0;
+	aes_block_t s_x = s0, hash_block;
+	int counter = 1;
+	const size_t L = sizeof(__m128i) - 1 - nonce_length;
+	__m128i pad_block;
+
+	/*
+	 * The starting hash (post AAD, if any).
+	 */
+	if (hashp)
+		hash_block = *hashp;
+	
+	while (total < nbytes) {
+		aes_block_t temp_block;
+
+		size_t copy_amt = MIN(nbytes - total, sizeof(temp_block));
+		if (copy_amt < sizeof(temp_block)) {
+			temp_block.block = _mm_setzero_si128();
+		}
+		bcopy(in+total, &temp_block, copy_amt);
+
+		/*
+		 * temp_block has the current block of input data,
+		 * zero-padded if necessary.  This is used in computing
+		 * both the decrypted data, and the authentication hash.
+		 */
+		append_int(counter++, &s_x.block, L+1);
+		/*
+		 * The hash is computed based on the decrypted data.
+		 */
+		pad_block = AESNI_ENC(s_x.block, key, nr);
+		if (copy_amt < sizeof(temp_block)) {
+			/*
+			 * Need to pad out both blocks with 0.
+			 */
+			uint8_t *end_of_buffer = (uint8_t*)&pad_block;
+			bzero(&temp_block.bytes[copy_amt],
+			    sizeof(temp_block) - copy_amt);
+			bzero(end_of_buffer + copy_amt,
+			    sizeof(temp_block) - copy_amt);
+		}
+		temp_block.block = _mm_xor_si128(temp_block.block,
+		    pad_block);
+
+		if (out)
+			bcopy(&temp_block, out+total, copy_amt);
+
+		if (hashp)
+			hash_block.block = xor_and_encrypt(hash_block.block,
+			    temp_block.block, key, nr);
+		total += copy_amt;
+	}
+	explicit_bzero(&pad_block, sizeof(pad_block));
+
+	if (hashp)
+		*hashp = hash_block;
+	return;
+}
+
+/*
+ * The exposed decryption routine.  This is practically a
+ * copy of the encryption routine, except that the order
+ * in which the hash is created is changed.
+ * XXX combine the two functions at some point!
  */
 int
 AES_CCM_decrypt(const unsigned char *in, unsigned char *out,
@@ -333,13 +443,7 @@ AES_CCM_decrypt(const unsigned char *in, unsigned char *out,
 {
 	static const int tag_length = 16;	/* 128 bits */
 	int L;
-	int counter = 1;	/* S0 has 0, S1 has 1 */
-	size_t copy_amt, total = 0;
-	
-	union {
-		__m128i block;
-		uint8_t bytes[sizeof(__m128i)];
-	} s0, last_block, current_block, s_x, temp_block;
+	aes_block_t s0, last_block, current_block, s_x, temp_block;
 	
 #ifdef CRYPTO_DEBUG
 	printf("%s(%p, %p, %p, %p, %p, %u, %u, %d, %p, %d)\n",
@@ -368,8 +472,8 @@ AES_CCM_decrypt(const unsigned char *in, unsigned char *out,
 	/*
 	 * Clear out the blocks
 	 */
-	explicit_bzero(&s0, sizeof(s0));
-	explicit_bzero(&current_block, sizeof(current_block));
+	s0.block = _mm_setzero_si128();
+	current_block = s0;
 
 	last_block.block = cbc_mac_start(addt, abytes, nonce, nlen,
 					 key, nr, nbytes, tag_length);
@@ -383,48 +487,27 @@ AES_CCM_decrypt(const unsigned char *in, unsigned char *out,
 	/*
 	 * Now to cycle through the rest of the data.
 	 */
-	bcopy(&s0, &s_x, sizeof(s0));
+	s_x = s0;
 
-	while (total < nbytes) {
-		copy_amt = MIN(nbytes - total, sizeof(temp_block));
-		bcopy(in+total, &temp_block, copy_amt);
-		if (copy_amt < sizeof(temp_block)) {
-			bzero(&temp_block.bytes[copy_amt], sizeof(temp_block) - copy_amt);
-		}
-		append_int(counter++, &s_x.block, L+1);
-		// This actually decrypts, remember
-#ifdef CRYPTO_DEBUG
-		PrintBlock("Decrypt s_x", s_x.block);
-#endif
-		__m128i X = aes_encrypt(s_x.block, key, nr);
-		if (copy_amt < sizeof(temp_block)) {
-			uint8_t *end_of_buffer = (uint8_t*)&X;
-			bzero(&temp_block.bytes[copy_amt], sizeof(temp_block) - copy_amt);
-			bzero(end_of_buffer + copy_amt, sizeof(temp_block) - copy_amt);
-		}
-		temp_block.block = _mm_xor_si128(temp_block.block, X);
-#ifdef CRYPTO_DEBUG
-		PrintBlock("Decrypted plain text", temp_block.block);
-#endif
+	decrypt_loop(in, NULL, nbytes, s0, nlen, &last_block, key, nr);
 
-		bcopy(&temp_block, out+total, copy_amt);
-		last_block.block = xor_and_encrypt(last_block.block, temp_block.block, key, nr);
-		total += copy_amt;
-	}
 	/*
-	 * Allgedly done with it!  Except for the tag.
+	 * Compare the tag.
 	 */
-	s0.block = aes_encrypt(s0.block, key, nr);
-	temp_block.block = _mm_xor_si128(s0.block, last_block.block);
-	// Compare the tag
+	temp_block.block = _mm_xor_si128(AESNI_ENC(s0.block, key, nr),
+	    last_block.block);
 	if (bcmp(&temp_block, tag, tag_length) != 0) {
 #ifdef CRYPTO_DEBUG
 		PrintBlock("Computed tag", temp_block.block);
 		PrintBlock("Input tag   ", *(const __m128i*)tag);
 #endif
-		bzero(out, nbytes);
 		return 0;
 	}
+
+	/*
+	 * Push out the decryption results this time.
+	 */
+	decrypt_loop(in, out, nbytes, s0, nlen, NULL, key, nr);
 	return 1;
 }
 

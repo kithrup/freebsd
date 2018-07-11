@@ -1001,7 +1001,8 @@ cryptodev_aead(
 	 * cipher text.
 	 */
 	crda->crd_skip = 0;
-	if (cse->cipher == CRYPTO_AES_NIST_GCM_16)
+	if (cse->cipher == CRYPTO_AES_NIST_GCM_16 ||
+	    cse->cipher == CRYPTO_AES_CCM_16)
 		crda->crd_len = caead->aadlen;
 	else
 		crda->crd_len = caead->aadlen + caead->len;
