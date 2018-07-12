@@ -24,24 +24,6 @@ aesni_ccm.o: aesni_ccm.c
 	     -mmmx -msse -msse4 -maes -mpclmul ${.IMPSRC}
 	${CTFCONVERT_CMD}
 
-aesni_ccm.o: aesni_ccm.c
-	# XXX - gcc won't understand -mpclmul
-	${CC} -c ${CFLAGS:C/^-O2$/-O3/:N-nostdinc} ${WERROR} ${PROF} \
-	     -mmmx -msse -msse4 -maes -mpclmul ${.IMPSRC}
-	${CTFCONVERT_CMD}
-
-aesni_ccm.o: aesni_ccm.c
-	# XXX - gcc won't understand -mpclmul
-	${CC} -c ${CFLAGS:C/^-O2$/-O3/:N-nostdinc} ${WERROR} ${PROF} \
-	     -mmmx -msse -msse4 -maes -mpclmul ${.IMPSRC}
-	${CTFCONVERT_CMD}
-
-aesni_ccm.o: aesni_ccm.c
-	# XXX - gcc won't understand -mpclmul
-	${CC} -c ${CFLAGS:C/^-O2$/-O3/:N-nostdinc} ${WERROR} ${PROF} \
-	     -mmmx -msse -msse4 -maes -mpclmul ${.IMPSRC}
-	${CTFCONVERT_CMD}
-
 aesni_wrap.o: aesni_wrap.c
 	${CC} -c ${CFLAGS:C/^-O2$/-O3/:N-nostdinc} ${WERROR} ${PROF} \
 	     -mmmx -msse -msse4 -maes ${.IMPSRC}
