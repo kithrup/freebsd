@@ -2121,26 +2121,6 @@ do_import(nvlist_t *config, const char *newname, const char *mntopts,
 			ret = 1;
 	}
 
-	/*
-	 * Loading keys is best effort. We don't want to return immediately
-	 * if it fails but we do want to give the error to the caller.
-	 */
-	if (flags & ZFS_IMPORT_LOAD_KEYS) {
-		ret = zfs_crypto_attempt_load_keys(g_zfs, name);
-		if (ret != 0)
-			ret = 1;
-	}
-
-	/*
-	 * Loading keys is best effort. We don't want to return immediately
-	 * if it fails but we do want to give the error to the caller.
-	 */
-	if (flags & ZFS_IMPORT_LOAD_KEYS) {
-		ret = zfs_crypto_attempt_load_keys(g_zfs, name);
-		if (ret != 0)
-			ret = 1;
-	}
-
 	if (zpool_get_state(zhp) != POOL_STATE_UNAVAIL &&
 	    !(flags & ZFS_IMPORT_ONLY) &&
 	    zpool_enable_datasets(zhp, mntopts, 0) != 0) {
@@ -2421,28 +2401,6 @@ zpool_do_import(int argc, char **argv)
 
 	if (cachefile && nsearch != 0) {
 		(void) fprintf(stderr, gettext("-c is incompatible with -d\n"));
-		usage(B_FALSE);
-	}
-
-	if ((flags & ZFS_IMPORT_LOAD_KEYS) && (flags & ZFS_IMPORT_ONLY)) {
-		(void) fprintf(stderr, gettext("-l is incompatible with -N\n"));
-		usage(B_FALSE);
-	}
-
-	if ((flags & ZFS_IMPORT_LOAD_KEYS) && !do_all && argc == 0) {
-		(void) fprintf(stderr, gettext("-l is only meaningful during "
-		    "an import\n"));
-		usage(B_FALSE);
-	}
-
-	if ((flags & ZFS_IMPORT_LOAD_KEYS) && (flags & ZFS_IMPORT_ONLY)) {
-		(void) fprintf(stderr, gettext("-l is incompatible with -N\n"));
-		usage(B_FALSE);
-	}
-
-	if ((flags & ZFS_IMPORT_LOAD_KEYS) && !do_all && argc == 0) {
-		(void) fprintf(stderr, gettext("-l is only meaningful during "
-		    "an import\n"));
 		usage(B_FALSE);
 	}
 
