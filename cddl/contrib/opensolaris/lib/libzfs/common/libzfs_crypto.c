@@ -122,50 +122,29 @@ catch_signal(int sig)
 }
 
 #if defined(__FreeBSD__) && !defined(_KERNEL)
-static int random_fd = -1;
-
 void
 random_init()
 {
-	VERIFY((random_fd = open("/dev/random", O_RDONLY)) != -1);
-
+	return;
 }
-
 void
 random_fini()
 {
-	close(random_fd); random_fd = -1;
 	return;
-}
-
-static int
-random_get_bytes_common(uint8_t *ptr, size_t len, int fd)
-{
-	size_t resid = len;
-	ssize_t bytes;
-
-	ASSERT(fd != -1);
-
-	while (resid != 0) {
-		bytes = read(fd, ptr, resid);
-		ASSERT3S(bytes, >=, 0);
-		ptr += bytes;
-		resid -= bytes;
-	}
-
-	return (0);
 }
 
 int
 random_get_bytes(uint8_t *ptr, size_t len)
 {
-	return (random_get_bytes_common(ptr, len, random_fd));
+	arc4rand(ptr, len, 0);
+	return (0);
 }
 int
 random_get_pseudo_bytes(uint8_t *ptr, size_t len)
 {
-	return (random_get_bytes_common(ptr, len, random_fd));
+	return (random_get_bytes(ptr, len));
 }
+
 #endif /* __FreeBSD__ && !_KERNEL */
 
 static char *
@@ -1052,6 +1031,7 @@ zfs_crypto_attempt_load_keys(libzfs_handle_t *hdl, char *fsname)
 	zfs_handle_t *zhp = NULL;
 	loadkey_cbdata_t cb = { 0 };
 
+	fprintf(stderr, "%s(%p, %s)\n", __FUNCTION__, hdl, fsname);
 	zhp = zfs_open(hdl, fsname, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME);
 	if (zhp == NULL) {
 		ret = ENOENT;
