@@ -136,7 +136,7 @@ random_fini()
 int
 random_get_bytes(uint8_t *ptr, size_t len)
 {
-	arc4rand(ptr, len, 0);
+	arc4random_buf(ptr, len);
 	return (0);
 }
 int
