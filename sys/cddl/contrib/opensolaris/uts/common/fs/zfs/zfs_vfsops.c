@@ -1013,9 +1013,7 @@ zfsvfs_create(const char *osname, zfsvfs_t **zfvp)
 	}
 
 	error = zfsvfs_create_impl(zfvp, zfsvfs, os);
-	if (error != 0) {
-		dmu_objset_disown(os, B_TRUE, zfsvfs);
-	}
+
 	return (error);
 }
 
