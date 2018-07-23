@@ -3978,22 +3978,46 @@ arc_hdr_realloc_crypt(arc_buf_hdr_t *hdr, boolean_t need_crypt)
 	arc_buf_hdr_t *nhdr;
 	arc_buf_t *buf;
 	kmem_cache_t *ncache, *ocache;
+	unsigned nsize, osize;
 
 	ASSERT(HDR_HAS_L1HDR(hdr));
 	ASSERT3U(!!HDR_PROTECTED(hdr), !=, need_crypt);
 	ASSERT3P(hdr->b_l1hdr.b_state, ==, arc_anon);
 	ASSERT(!multilist_link_active(&hdr->b_l1hdr.b_arc_node));
+	ASSERT(!list_link_active(&hdr->b_l2hdr.b_l2node));
+	ASSERT3P(hdr->b_hash_next, ==, NULL);
 
 	if (need_crypt) {
 		ncache = hdr_full_crypt_cache;
+		nsize = sizeof (hdr->b_crypt_hdr);
 		ocache = hdr_full_cache;
+		osize = HDR_FULL_SIZE;
 	} else {
 		ncache = hdr_full_cache;
+		nsize = HDR_FULL_SIZE;
 		ocache = hdr_full_crypt_cache;
+		osize = sizeof (hdr->b_crypt_hdr);
 	}
 
 	nhdr = kmem_cache_alloc(ncache, KM_PUSHPAGE);
-	bcopy(hdr, nhdr, HDR_L2ONLY_SIZE);
+
+	/*
+	 * Copy all members that aren't locks or condvars to the new header.
+	 * No lists are pointing to us (as we asserted above), so we don't
+	 * need to worry about the list nodes.
+	 */
+	nhdr->b_dva = hdr->b_dva;
+	nhdr->b_birth = hdr->b_birth;
+	nhdr->b_type = hdr->b_type;
+	nhdr->b_flags = hdr->b_flags;
+	nhdr->b_psize = hdr->b_psize;
+	nhdr->b_lsize = hdr->b_lsize;
+	nhdr->b_spa = hdr->b_spa;
+	nhdr->b_l2hdr.b_dev = hdr->b_l2hdr.b_dev;
+	nhdr->b_l2hdr.b_daddr = hdr->b_l2hdr.b_daddr;
+#ifndef __FreeBSD__
+	nhdr->b_l2hdr.b_hits = hdr->b_l2hdr.b_hits;
+#endif
 	nhdr->b_l1hdr.b_freeze_cksum = hdr->b_l1hdr.b_freeze_cksum;
 	nhdr->b_l1hdr.b_bufcnt = hdr->b_l1hdr.b_bufcnt;
 	nhdr->b_l1hdr.b_byteswap = hdr->b_l1hdr.b_byteswap;
@@ -4001,7 +4025,7 @@ arc_hdr_realloc_crypt(arc_buf_hdr_t *hdr, boolean_t need_crypt)
 	nhdr->b_l1hdr.b_arc_access = hdr->b_l1hdr.b_arc_access;
 	nhdr->b_l1hdr.b_acb = hdr->b_l1hdr.b_acb;
 	nhdr->b_l1hdr.b_pabd = hdr->b_l1hdr.b_pabd;
-	nhdr->b_l1hdr.b_buf = hdr->b_l1hdr.b_buf;
+
 #ifdef ZFS_DEBUG
 	if (hdr->b_l1hdr.b_thawed != NULL) {
 		nhdr->b_l1hdr.b_thawed = hdr->b_l1hdr.b_thawed;
@@ -4015,7 +4039,7 @@ arc_hdr_realloc_crypt(arc_buf_hdr_t *hdr, boolean_t need_crypt)
 	 * a small race condition that could trigger ASSERTs.
 	 */
 	(void) refcount_add(&nhdr->b_l1hdr.b_refcnt, FTAG);
-
+	nhdr->b_l1hdr.b_buf = hdr->b_l1hdr.b_buf;
 	for (buf = nhdr->b_l1hdr.b_buf; buf != NULL; buf = buf->b_next) {
 		mutex_enter(&buf->b_evict_lock);
 		buf->b_hdr = nhdr;
@@ -4023,12 +4047,44 @@ arc_hdr_realloc_crypt(arc_buf_hdr_t *hdr, boolean_t need_crypt)
 	}
 	refcount_transfer(&nhdr->b_l1hdr.b_refcnt, &hdr->b_l1hdr.b_refcnt);
 	(void) refcount_remove(&nhdr->b_l1hdr.b_refcnt, FTAG);
+	ASSERT0(refcount_count(&hdr->b_l1hdr.b_refcnt));
 
 	if (need_crypt) {
 		arc_hdr_set_flags(nhdr, ARC_FLAG_PROTECTED);
 	} else {
 		arc_hdr_clear_flags(nhdr, ARC_FLAG_PROTECTED);
 	}
+
+	/* unset all members of the original hdr */
+	bzero(&hdr->b_dva, sizeof (dva_t));
+	hdr->b_birth = 0;
+	hdr->b_type = ARC_BUFC_INVALID;
+	hdr->b_flags = 0;
+	hdr->b_psize = 0;
+	hdr->b_lsize = 0;
+	hdr->b_spa = 0;
+	hdr->b_l2hdr.b_dev = NULL;
+	hdr->b_l2hdr.b_daddr = 0;
+#ifndef __FreeBSD__
+	hdr->b_l2hdr.b_hits = 0;
+	hdr->b_l1hdr.b_mru_hits = 0;
+	hdr->b_l1hdr.b_mru_ghost_hits = 0;
+	hdr->b_l1hdr.b_l2_hits = 0;
+	hdr->b_l1hdr.b_mfu_hits = 0;
+	hdr->b_l1hdr.b_mfu_ghost_hits = 0;
+#endif
+	hdr->b_l1hdr.b_freeze_cksum = NULL;
+	hdr->b_l1hdr.b_buf = NULL;
+	hdr->b_l1hdr.b_bufcnt = 0;
+	hdr->b_l1hdr.b_byteswap = 0;
+	hdr->b_l1hdr.b_state = NULL;
+	hdr->b_l1hdr.b_arc_access = 0;
+	hdr->b_l1hdr.b_acb = NULL;
+	hdr->b_l1hdr.b_pabd = NULL;
+
+	arc_space_consume(nsize, ARC_SPACE_HDRS);
+	arc_space_return(osize, ARC_SPACE_HDRS);
+
 	buf_discard_identity(hdr);
 	kmem_cache_free(ocache, hdr);
 
@@ -4253,6 +4309,9 @@ arc_hdr_destroy(arc_buf_hdr_t *hdr)
 	}
 
 	ASSERT3P(hdr->b_hash_next, ==, NULL);
+	if (HDR_PROTECTED(hdr)) {
+		ASSERT(HDR_HAS_L1HDR(hdr));
+	}
 	if (HDR_HAS_L1HDR(hdr)) {
 		ASSERT(!multilist_link_active(&hdr->b_l1hdr.b_arc_node));
 		ASSERT3P(hdr->b_l1hdr.b_acb, ==, NULL);
@@ -5241,6 +5300,7 @@ arc_kmem_reap_now(void)
 	kmem_cache_reap_soon(hdr_full_cache);
 	kmem_cache_reap_soon(hdr_l2only_cache);
 	kmem_cache_reap_soon(range_seg_cache);
+	kmem_cache_reap_soon(hdr_full_crypt_cache);
 
 #ifdef illumos
 	if (zio_arena != NULL) {
