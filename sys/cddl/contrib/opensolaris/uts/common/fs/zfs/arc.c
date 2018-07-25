@@ -2674,7 +2674,9 @@ arc_buf_fill(arc_buf_t *buf, spa_t *spa, const zbookmark_phys_t *zb,
 	if (HDR_PROTECTED(hdr)) {
 		error = arc_fill_hdr_crypt(hdr, hash_lock, spa,
 		    zb, !!(flags & ARC_FILL_NOAUTH));
-		if (error != 0) {
+		if (error == EACCES && (flags & ARC_FILL_IN_PLACE) != 0) {
+			return (error);
+		} else if (error != 0) {
 			if (hash_lock != NULL)
 				mutex_enter(hash_lock);
 			arc_hdr_set_flags(hdr, ARC_FLAG_IO_ERROR);
@@ -6121,7 +6123,9 @@ arc_read_done(zio_t *zio)
 		}
 
 		if (error != 0) {
-			arc_buf_destroy(acb->acb_buf, acb->acb_private);
+			(void) remove_reference(hdr, hash_lock,
+			    acb->acb_private);
+			arc_buf_destroy_impl(acb->acb_buf);
 			acb->acb_buf = NULL;
 		}
 
@@ -6345,7 +6349,9 @@ top:
 				}
 			}
 			if (rc != 0) {
-				arc_buf_destroy(buf, private);
+				(void) remove_reference(hdr, hash_lock,
+				    private);
+				arc_buf_destroy_impl(buf);
 				buf = NULL;
 			}
 			/* assert any errors weren't due to unloaded keys */
